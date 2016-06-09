@@ -29,10 +29,16 @@
         The password of the user which is used to log on.
     .PARAMETER ResourceName
         The display name of the resource to be launched.
+    .PARAMETER TimeoutForSFLoginPage
+        The time to wait for the StoreFront login form page to load.
+    .PARAMETER TimeoutForSFResourcesPage
+        The time to wait for the StoreFront resources page to load (post-logon).
+    .PARAMETER TimeoutForSessionLogin
+        The time to wait for the app/desktop to launch and connect.
+    .PARAMETER TimeoutForOther
+        The time to wait for other trivial automation steps.
     .PARAMETER SleepBeforeLogoff
         The time in seconds to sleep after clicking the resource and before logging off. Default is 5.
-    .PARAMETER NumberOfRetries
-        The number of retries when retrieving an element. Default is 30.
     .PARAMETER LogFilePath
         Directory path to where the log file will be saved. Default is SystemDrive\Temp.
     .PARAMETER LogFileName
@@ -68,13 +74,16 @@ Param (
     [Parameter(Mandatory=$true,Position=1)] [string]$UserName,
     [Parameter(Mandatory=$true,Position=2)] [string]$Password,
     [Parameter(Mandatory=$true,Position=3)] [string]$ResourceName,
-    [Parameter(Mandatory=$false)] [int]$SleepBeforeLogoff = 5,
-    [Parameter(Mandatory=$false)] [int]$NumberOfRetries = 30,
-    [Parameter(Mandatory=$false)] [string]$LogFilePath = "$($env:SystemDrive)\Temp\",
-    [Parameter(Mandatory=$false)] [string]$LogFileName = "SFLauncher_$($UserName.Replace('\','_')).log",
-    [Parameter(Mandatory=$false)] [switch]$NoLogFile,
-    [Parameter(Mandatory=$false)] [switch]$NoConsoleOutput,
-    [Parameter(Mandatory=$false)] [string]$TwoFactorAuth
+    [Parameter(Mandatory=$false,Position=4)] [int]$TimeoutForSFLoginPage = 30,
+    [Parameter(Mandatory=$false,Position=5)] [int]$TimeoutForSFResourcesPage = 30,
+    [Parameter(Mandatory=$false,Position=6)] [int]$TimeoutForSessionLogin = 60,
+    [Parameter(Mandatory=$false,Position=7)] [int]$TimeoutForOther = 5,
+    [Parameter(Mandatory=$false,Position=8)] [int]$SleepBeforeLogoff = 30,
+    [Parameter(Mandatory=$false,Position=9)] [string]$LogFilePath = "$($env:SystemDrive)\Temp\",
+    [Parameter(Mandatory=$false,Position=10)] [string]$LogFileName = "SFLauncher_$($UserName.Replace('\','_')).log",
+    [Parameter(Mandatory=$false,Position=11)] [switch]$NoLogFile,
+    [Parameter(Mandatory=$false,Position=12)] [switch]$NoConsoleOutput,
+    [Parameter(Mandatory=$false,Position=13)] [string]$TwoFactorAuth
 )
 
 Set-StrictMode -Version 2
@@ -87,19 +96,32 @@ Set-Variable -Name NGTwoFactorTextBoxName -Value "passwd1" -Option Constant -Sco
 Set-Variable -Name SFLoginButtonId -Value "loginBtn" -Option Constant -Scope Script
 Set-Variable -Name SFUsernameTextBoxId -Value "username" -Option Constant -Scope Script
 Set-Variable -Name SFPasswordTextBoxId -Value "password" -Option Constant -Scope Script
-Set-Variable -Name SFLogOffLinkId -Value "userdetails-logoff" -Option Constant -Scope Script
+Set-Variable -Name SFLogOffLinkId -Value "menuLogOffBtn" -Option Constant -Scope Script
+
+
+function Clear-Log {
+	$LogFile = $($LogFilePath.TrimEnd('\') + "\$LogFileName")
+	if(Test-Path "$LogFile" -PathType Leaf) {
+        Remove-Item -Path $LogFile -Force -ErrorAction Stop | Out-Null
+    }
+
+    $sfContentPath = $($LogFilePath.TrimEnd('\') + "\sfcontent.html")
+    if(Test-Path "$sfContentPath" -PathType Leaf) {
+        Remove-Item -Path $sfContentPath -Force -ErrorAction Stop | Out-Null
+    }
+}
+
+function Clear-Environment {
+    # kill all iexplore
+    $currentSessionId = (get-process -PID $pid).SessionId
+    Get-Process iexplore.exe -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $currentSessionId } | Stop-Process
+}
 
 function Write-SFLauncherHeader {
-    $infoMessage = @"
-
-                           *****************************************************
-                           *****  Citrix Solutions Lab SF Launcher Script  *****
-                           *****        -Console output:     {0,-6}        *****
-                           *****        -Log output:         {1,-6}        *****
-                           *****************************************************
-
-"@  -f $(-not $NoConsoleOutput),$(-not $NoLogFile)
-    Write-Host $infoMessage
+    Write-ToSFLauncherLog "SiteURL: $SiteURL"
+    Write-ToSFLauncherLog "UserName: $UserName"
+    Write-ToSFLauncherLog "Password: *****"
+    Write-ToSFLauncherLog "ResourceName: $ResourceName"
 }
 
 function Write-ToSFLauncherLog {
@@ -110,6 +132,11 @@ function Write-ToSFLauncherLog {
         [Parameter(Mandatory=$false)] [bool]$NoLogFile=$NoLogFile
     )
     Begin {
+
+        if(-not (Test-Path $LogFilePath -PathType Container)) {
+            New-Item $LogFilePath -Type Directory
+        }
+
         if(Test-Path $LogFile -IsValid) {
             if(!(Test-Path "$LogFile" -PathType Leaf)) {
                 New-Item -Path $LogFile -ItemType "file" -Force -ErrorAction Stop | Out-Null			
@@ -131,9 +158,14 @@ function Write-ToSFLauncherLog {
     }
 }
 
+function Write-SFContent {
+    $sfContentPath = $($LogFilePath.TrimEnd('\') + "\sfcontent.html")
+    $internetExplorer.Document.querySelector("html").outerHTML | Out-File -FilePath $sfContentPath
+}
+
 function Wait-ForPageReady {
     while ($internetExplorer.ReadyState -ne 4) {
-        Write-ToSFLauncherLog "Internet Explorer: BUSY"
+        Write-ToSFLauncherLog "Internet Explorer: WAIT"
         Start-Sleep 1
     }   
 }
@@ -143,7 +175,7 @@ function Open-InternetExplorer {
         [Parameter(Mandatory=$true)] [string]$SiteURL    
     )
     Write-ToSFLauncherLog "Creating Internet Explorer COM object"
-    New-Variable -Name internetExplorer -Value (New-Object -ComObject "InternetExplorer.Application") -Scope Script
+    New-Variable -Name internetExplorer -Value (New-Object -ComObject "InternetExplorer.Application") -Scope Global
     Write-ToSFLauncherLog "Setting Internet Explorer visible"
     $internetExplorer.visible = $true
     Write-ToSFLauncherLog "Navigating to '$SiteURL'"
@@ -171,12 +203,13 @@ function Test-LoginForm {
             $loginButton = $SFloginButton
             break
         } else {
-            Write-ToSFLauncherLog "Try #$try`: FAIL"
+            Write-ToSFLauncherLog "Try #$try`: WAIT"
             Start-Sleep -Seconds 1
             $try++
         }
-    } until ($try -gt $NumberOfRetries)
+    } until ($try -gt $TimeoutForSFLoginPage)
     if ($loginButton -eq $null -or $loginButton.GetType() -eq [DBNull]) {
+        Write-SFContent
         throw "Login button not found"
     }    
 }
@@ -239,12 +272,13 @@ function Start-Resource {
             Write-ToSFLauncherLog "Try #$try`: SUCCESS"
             break
         } else {
-            Write-ToSFLauncherLog "Try #$try`: FAIL"
+            Write-ToSFLauncherLog "Try #$try`: WAIT"
             Start-Sleep -Seconds 1
             $try++
         }
-    } until ($try -gt $NumberOfRetries)
+    } until ($try -gt $TimeoutForSFResourcesPage)
     if ($logoffLink -eq $null -or $logoffLink.GetType() -eq [DBNull]) {
+        Write-SFContent
         throw "SF recources page not found"
     }
 
@@ -256,12 +290,13 @@ function Start-Resource {
             Write-ToSFLauncherLog "Try #$try`: SUCCESS"
             break
         } else {
-            Write-ToSFLauncherLog "Try #$try`: FAIL"
+            Write-ToSFLauncherLog "Try #$try`: WAIT"
             Start-Sleep -Seconds 1
             $try++
         }
-    } until ($try -gt $NumberOfRetries)
+    } until ($try -gt $TimeoutForOther)
     if ($resource -eq $null) {
+        Write-SFContent
         throw "Resource '$ResourceName' not found"
     }
 
@@ -292,20 +327,61 @@ function Start-Resource {
         if ($wficaFound) {
             break
         } else {
-            Write-ToSFLauncherLog "Try #$try`: FAIL"
+            Write-ToSFLauncherLog "Try #$try`: WAIT"
             Start-Sleep -Seconds 1
             $try++
         }
-    } until ($try -gt $NumberOfRetries)
+    } until ($try -gt $TimeoutForSessionLogin)
+
     if (-not $wficaFound) {
-        Write-ToSFLauncherLog "WARNING: Unable to confirm that session launched"
+        Write-SFContent
+        throw "Unable to confirm that session launched"
     }
 }
 
-function Disconnect-User {
+function Logoff-Sessions {
+
     Write-ToSFLauncherLog "Sleeping $SleepBeforeLogoff seconds before logging off..."
     Start-Sleep -Seconds $SleepBeforeLogoff
+
+    Write-ToSFLauncherLog "Logging off sessions..."
+
+    $job = Start-Job -RunAs32 -ScriptBlock {
+
+    #Load WfIcaLib.dll for ICA client access
+
+    $WfIcaLibDllX64 = "C:\Program Files\Citrix\ICA Client\WfIcaLib.dll"
+    $WfIcaLibDllX32 = "C:\Program Files (x86)\Citrix\ICA Client\WfIcaLib.dll"
     
+    if (Test-Path $WfIcaLibDllX32) {
+        Add-Type -Path $WfIcaLibDllX32
+    }
+    else {
+        Add-Type -Path $WfIcaLibDllX64
+    }
+
+    # Enumerate and logoff all sessions
+
+    $icaClient = New-Object WFICALib.ICAClientClass
+    $icaClient.OutputMode = [WFICALib.OutputMode]::OutputModeNormal
+    $enumHandle = $icaClient.EnumerateCCMSessions()
+    $numSessions = $icaClient.GetEnumNameCount($EnumHandle)
+
+    for( $index = 0; $index -lt $numSessions; $index++)
+    {
+        $sessionid = $icaClient.GetEnumNameByIndex($enumHandle, $index)
+        $icaClient.StartMonitoringCCMSession($sessionid,$true)       
+        $icaClient.Logoff()
+        $icaClient.StopMonitoringCCMSession($sessionid);
+    }
+
+    $icaClient.CloseEnumHandle($EnumHandle) | Out-Null
+    }
+
+    Wait-Job -Job $job
+}
+
+function Logoff-StoreFront {
     Write-ToSFLauncherLog "Getting log off link..."
     $try = 1
     do {    
@@ -314,11 +390,11 @@ function Disconnect-User {
             Write-ToSFLauncherLog "Try #$try`: SUCCESS"
             break
         } else {
-            Write-ToSFLauncherLog "Try #$try`: FAIL"
+            Write-ToSFLauncherLog "Try #$try`: WAIT"
             Start-Sleep -Seconds 1
             $try++
         }
-    } until ($try -gt $NumberOfRetries)
+    } until ($try -gt $TimeoutForOther)
     if ($logoffLink -eq $null -or $logoffLink.GetType() -eq [DBNull]) {
         Write-ToSFLauncherLog "Log off link not found"
     } else {
@@ -328,6 +404,10 @@ function Disconnect-User {
 }
 
 try {
+    Clear-Log
+
+    Clear-Environment
+
     Write-ToSFLauncherLog "*************** LAUNCHER SCRIPT BEGIN ***************"
     
     Write-SFLauncherHeader
@@ -342,13 +422,17 @@ try {
     
     Start-Resource
 
-    Disconnect-User   
+    LogOff-Sessions
+
+    LogOff-StoreFront
+
+    Clear-Environment
 }
 catch {
     Write-ToSFLauncherLog "Exception caught by script"
     $_.ToString() | Write-ToSFLauncherLog
     $_.InvocationInfo.PositionMessage | Write-ToSFLauncherLog
-    throw $_
+    exit 1
 }
 finally {   
     if ($internetExplorer -is [System.__ComObject]) {
@@ -358,7 +442,12 @@ finally {
         }
         Write-ToSFLauncherLog "Releasing Internet Explorer COM object"
         [System.Runtime.Interopservices.Marshal]::ReleaseComObject($internetExplorer) | Out-Null
-        Remove-Variable -Name internetExplorer
+        Remove-Variable -Name internetExplorer -Scope Global
     }
+
+    Clear-Environment
+
     Write-ToSFLauncherLog "***************  LAUNCHER SCRIPT END  ***************"
-} 
+}
+
+exit 0
